@@ -1,0 +1,270 @@
+{
+    // Changes to this file will be picked up live by all modules using it, not all values will be picked up without restarting the module
+    // For example, changing the database path in this file will not redirect the modules as they do not close and reopen their db connections
+
+    // Anything after a // will be removed from this file unless it is preceded with : like :// in file paths or URLs, see JSONstrip() in utils for details
+
+    "appDirectory": "/some/path/apm/streaming_stat_parser",
+    "amqpConnectionString": "amqp://localhost:5772",
+    "logDir": "/some/path/apm/streaming_stat_parser/logs",
+    "statLogIntervalInSeconds": 60, // This won't take effect until the current interval finishes
+
+    "dbInsertQueue": "db_insert",
+
+    // Each array element object must contain a "type" attribute with value of either "average" or "percentile"
+    // If percentile, it also requires a "percentileValue" attribute with value being an integer from 1-99
+    // TODO to actually implement this, UNUSED CURRENTLY
+    "statistics": [
+        {
+            "type": "average"
+        },
+        {
+            "type": "percentile",
+            "percentileValue": 75
+        },
+        {
+            "type": "percentile",
+            "percentileValue": 95
+        }
+    ],
+
+    // App manager
+    "applicationManager": {
+        "logFilePrefix": "apm_manager",
+        "fromEmail": "apm@company.com",
+        "emailsEnabled": "true",
+        "emailList": "some_admin_email@company.com",
+        "alertCollectionIntervalInSeconds": 60, // Rolling window, basically once an alert comes in, it gets put in a bucket, after the interval passes, all errors will be sent out as a single batch in case many errors are coming out together
+        "increaseCollectionIntervalAfterAlert": true,
+        "maxCollectionIntervalInSeconds": 3840, // 960 = 16 minutes, interval increases by a factor of 2, so 1, 2, 4, 8, 16 minutes if we keep getting paged (for different services, the global cooldown still applies per service)
+        "rabbitSbinPath": "/some/path/apm/rabbitmq/rabbitmq_server-3.7.14/sbin",
+        "queueMessageAlertThreshold": 1000000,
+        "queueMemoryAlertThreshold": 150, // in MB
+        "moduleMemoryAlertThreshold": 350, // in MB
+        "moduleSwapAlertThreshold": 200, // in MB
+        "diskSpaceGBAvailableThreshold": 100, // in GB, it currently only checks the root mount of appDirectory
+        "diskSpacePercentageUsedThreshold": 80, // Percentage disk space used on mount to alert at
+        "inspectionFrequencySeconds": 60,
+        "sendAlertOnUnexpectedScriptEnd": true,
+        "triggerGCThreshold": 500, // in MB
+        "appLogRetentionDays": 7, // in days, files older than this many days will be removed, currently attempts on manager boot and every 12 hours thereafter
+        "pidListCommand": "ps -U prod -u prod -o pid,ppid,args", // This command must return a set of lines each with the format "PID PARENTPID FULL_COMMAND_WITH_ARGS"
+        "pidInspectionCommand": "/some/path/apm/streaming_stat_parser/pid_stats.py -p %PID% -S -q -m 2>/dev/null", // This command must return a single line with the format "%RSS_USED_MB% MiB %SWAP_USED_MB% MiB" Example: "1185.2 MiB 0.0 MiB"
+        "mountInspectionCommand": "df --block-size=1G --output=size,used,avail,pcent %MOUNT% | egrep -v 'Used' | sed 's|%||'", // This command must return a single line with the format "%DISK_SIZE_GB% %DISK_USED_GB% %DISK_AVAIL_GB% %DISK_USED_PERCENT%" (% symbols should not be included, just 4 numeric values)
+        "sharedNodeOpts": [ // These are passed to V8 (node) and not the module itself, these are not module parameters
+            "--expose-gc"
+        ],
+        // All of these need to be running for the app to function, they are started in the order listed
+        "moduleSettings": [
+            {
+                "relativePath": "stream_parse_transactions.js",
+                "heapInspectPort": 9260,
+                "moduleMemoryAlertThreshold": 700 // This one can get temporarily backed up when traffic is shut on and off and things like that during peak hours
+            },{
+                "relativePath": "stream_calc_stats.js",
+                "heapInspectPort": 9261
+                // "moduleMemoryAlertThreshold": 2000
+            },{
+                "relativePath": "stream_calc_z_score.js",
+                "heapInspectPort": 9262,
+                "moduleMemoryAlertThreshold": 700 // z_score holds a lot of data in memory for stat calculations
+            },{
+                "relativePath": "stream_process_alerts.js",
+                "heapInspectPort": 9266
+            },{
+                "relativePath": "stream_insert_db.js",
+                "heapInspectPort": 9264
+            },{
+                "relativePath": "pull_jvm_stats.js",
+                "heapInspectPort": 9265
+            }
+        ]
+    },
+    
+    // Initial parser - Tails and parses JVM logs
+    "streamParseTransactions": {
+        "logFilePrefix": "stream_parse_transactions",
+        "outQueue": "transactions",
+        "verboseQueueWrite": false,
+        "tailCommandPath": "/some/path/apm/streaming_stat_parser/perl_tail.pl",
+        "tailPauseFileFullPath": "/some/path/apm/streaming_stat_parser/state/PAUSE_TAILS.switch",
+        "appLogDirMaskPrefix": "/net/someserver/some/path/jvm1/log",
+        "maskSuffixes": [ "app*log", "server.log", "soap_io*log" ]
+    },
+
+    // Stream Parse
+    "streamCalcStats": {
+        "logFilePrefix": "stream_calc_stats",
+        "logDebug": false,
+        "inQueue": "transactions",
+        "outQueue": "stats",
+        "consumeQueue": true, // Setting this to false will stop reading from the queue, not recommended except for testing
+        "verboseQueueWrite": false,
+        "resumeFileFullPath": "/some/path/apm/streaming_stat_parser/save/stream_calc_stats.resume",
+        "resumeFileSaveFrequencyInSeconds": 60,
+        "intervalLengthInSeconds": 10, // THIS CANNOT BE CHANGED CURRENTLY
+        "windowSizeInIntervals": 30, // 30 * 10 = 300 = 5 minutes
+        "bufferSizeInIntervals": 6 // 6 * 10 = 60 = 1 minute
+    },
+
+    // Z Score
+    "streamCalcZScore": {
+        "logFilePrefix": "stream_calc_z_score",
+        "inQueue": "stats",
+        "outQueue": "z_score",
+        "consumeQueue": true, // Setting this to false will stop reading from the queue, not recommended except for testing
+        "verboseQueueWrite": false,
+        "resumeFileFullPath": "/some/path/apm/streaming_stat_parser/save/stream_calc_z_score.resume",
+        "resumeFileSaveFrequencyInSeconds": 60,
+        // lag: the lag parameter determines how much your data will be smoothed and how adaptive the algorithm is to changes in the long-term average of the data. The more stationary your data is, the more lags you should include (this should improve the robustness of the algorithm). If your data contains time-varying trends, you should consider how quickly you want the algorithm to adapt to these trends. I.e., if you put lag at 10, it takes 10 'periods' before the algorithm's treshold is adjusted to any systematic changes in the long-term average. So choose the lag parameter based on the trending behavior of your data and how adaptive you want the algorithm to be.
+
+        // threshold: the threshold parameter is the number of standard deviations from the moving mean above which the algorithm will classify a new datapoint as being a signal. For example, if a new datapoint is 4.0 standard deviations above the moving mean and the threshold parameter is set as 3.5, the algorithm will identify the datapoint as a signal. This parameter should be set based on how many signals you expect. For example, if your data is normally distributed, a threshold (or: z-score) of 3.5 corresponds to a signaling probability of 0.00047 (from this table), which implies that you expect a signal once every 2128 datapoints (1/0.00047). The threshold therefore directly influences how sensitive the algorithm is and thereby also how often the algorithm signals. Examine your own data and determine a sensible threshold that makes the algorithm signal when you want it to (some trial-and-error might be needed here to get to a good threshold for your purpose).
+
+        // influence: this parameter determines the influence of signals on the algorithm's detection threshold. If put at 0, signals have no influence on the threshold, such that future signals are detected based on a threshold that is calculated with a mean and standard deviation that is not influenced by past signals. Another way to think about this is that if you put the influence at 0, you implicitly assume stationarity (i.e. no matter how many signals there are, the time series always returns to the same average over the long term). If this is not the case, you should put the influence parameter somewhere between 0 and 1, depending on the extent to which signals can systematically influence the time-varying trend of the data. E.g., if signals lead to a structural break of the long-term average of the time series, the influence parameter should be put high (close to 1) so the threshold can adjust quickly to these changes.
+
+        // Changing the value of LAG or removing an entry will delete all running data for that LAG value in memory
+        "defaults": [
+            // {
+            //     "LAG": 6,   // Minute
+            //     "THRESHOLD": 15,
+            //     "INFLUENCE": 0.9
+            // },{
+            //     "LAG": 30,  // 5 Minutes
+            //     "THRESHOLD": 20,
+            //     "INFLUENCE": 0.7
+            // },
+            {
+                "LAG": 360, // One hour // 60 * 60 // This value is in intervals (10 seconds in stream_parse settings currently)
+                "THRESHOLD": 20.0,
+                "INFLUENCE": 0.1
+            },
+            {
+                "LAG": 8640, // 1 days // 360 * 24 * 1
+                "THRESHOLD": 15.0,
+                "INFLUENCE": 0.0
+            }
+            // {
+            //     "LAG": 8640, // 1 days // 360 * 24 * 1
+            //     "THRESHOLD": 20,
+            //     "INFLUENCE": 0.0
+            // }
+        ],
+        "overrides": { // These LAG values MUST match a LAG value in the defaults section
+            "services": { 
+                "S:getLateFeeWaiver": {
+                    "360": {
+                        "THRESHOLD": 25.0
+                        //, "INFLUENCE": 0.5 // Here as an example that influence can also be configured
+                    },
+                    "8640": {
+                        "THRESHOLD": 25.0
+                    }
+                }, 
+                "S:getLogActivity": {
+                    "360": {
+                        "THRESHOLD": 25.0
+                    },
+                    "8640": {
+                        "THRESHOLD": 25.0
+                    }
+                }
+            }
+        }
+    },
+
+    // Alerts
+    "streamProcessAlerts": {
+        "logFilePrefix": "stream_process_alerts",
+        "inQueue": "z_score",
+        "consumeQueue": true,
+        "verboseQueueWrite": false,
+        "alertsResumeFileFullPath": "/some/path/apm/streaming_stat_parser/save/stream_process_alerts.resume",
+        "resumeFileSaveFrequencyInSeconds": 60,
+        "ignoreOldAlertsDuringCatchupLimitInMinutes": 60, // (minutes) - Don't alert for alerts older than this many minutes, useful during catchup if process is stopped for a while and then restarted // TODO implement this
+        "defaults": { // TODO These aren't implemented yet
+            "hardMinMsAlertThreshold": 200, // (ms) - Never alert if the avg or per75 is < this value, even if alert is = 1
+            "hardMaxMsAlertThreshold": 3500, // (ms) - Always alert if avg or per75 is > this value
+            "hardMinTpmAlertThreshold": 1.0 // (TPM) - TPM must be > this value for an alert to trigger, hardMaxAlertThreshold will take precedence over this
+        },
+        "hardMinMsAlertThreshold": 200, // (ms) - Never alert if the avg or per75 is < this value, even if alert is = 1
+        "hardMaxMsAlertThreshold": 10000, // (ms) - Always alert if avg or per75 is > this value
+        "hardMinTpmAlertThreshold": 1.0, // (TPM) - TPM must be > this value for an alert to trigger, hardMaxAlertThreshold will take precedence over this
+        "alertOnBothOnly": true, // If this is true, an alert will only be triggered if both average and percentile alerts are active simultaneously
+        "overrides": { // These LAG values MUST match a LAG value in the defaults section
+            "services": { 
+                // "Provider:cb-util-comm-provider": {
+                //         "hardMaxMsAlertThreshold": 9000 // This service contains two fdr calls, raising it extra high so it stops alerting so much for single hits
+                // }
+            }
+        },
+        "suppressedLags": [ // Suppress all alerts for these lag values
+        ],
+        "rollingAlertWindowSizeInIntervals": 60, // 30 -> 5 minutes, if this value is > 1, it will only alert if a certain minimum number of intervals within this window try to trigger an alert (as dictated by the next option below)
+        // TODO reset this
+        "requiredNumberBadIntervalsInAlertWindowToTrigger": 45,  // if the rolling alert window is 30 (5 minutes), and we set this to 20, roughly 2/3 or more of the intervals have to raise an alert before an actual alert is sent out, this basically suppresses short-term spikes
+        "suppressedServices": [ // Suppress all alerts for services in this list
+            "S:getSalesServiceOffers"
+        ],
+        "perServiceAlertCooldownInMinutes": 15, // An alert for a specific service can only be triggered this often
+        "alertCollectionIntervalInSeconds": 60, // Rolling window, basically once an alert comes in, it gets put in a bucket, after the interval passes, all errors will be sent out as a single batch in case many errors are coming out together
+        "increaseCollectionIntervalAfterAlert": true,
+        "maxCollectionIntervalInSeconds": 960, // 960 = 16 minutes, interval increases by a factor of 2, so 1, 2, 4, 8, 16 minutes if we keep getting paged (for different services, the global cooldown still applies per service)
+        "fromEmail": "apm@company.com",
+        "emailsEnabled": "true",
+        "emailList": "some_email@company.com some_other_email@company.com",
+        "testEmailList": "some_admin_email@company.com"
+    },
+
+    // Sqlite
+    "streamInsertDb": {
+        "logFilePrefix": "stream_insert_db",
+        "consumeQueue": true, // Setting this to false will stop reading from the queue, not recommended except for testing
+        "bufferResumeFileFullPath": "/some/path/apm/streaming_stat_parser/save/stream_insert_db_buffer.resume",
+        "dbUser": "prod",
+        "dbHost": "localhost",
+        "dbDatabase": "apm",
+        "dbTxTable": "tx",
+        "dbStatTable": "stats",
+        "dbAlertTable": "alerts",
+        "dbJmxTable": "jmx",
+        "dbInsertBufferLimit": 1000, // If the buffer for a given entry type exceeds this number of records, it will try to insert them all to the db
+        "dbMaxTimeBetweenInsertsMs": 5000 // If the buffer isn't filling up fast enough to trigger the buffer limit insert, it will wait up to this many ms before trying to insert the buffer to the db anyway  (to prevent stale entries such as for alerts which are very sparse)
+    },
+
+    // JMX Stats
+    "pullJvmStats": {
+        "logFilePrefix": "pull_jvm_stats",
+        "verboseQueueWrite": false,
+        "clientJarFullPath": "/some/path/apm/streaming_stat_parser/jmx/jboss-cli-client.jar",
+        "jvmHosts": [ "jvm1.hostname.com", "jvm2.hostname.com" ],
+        "shortenHostname": true,
+        "adminUser": "adminUsername",
+        "adminPass": "adminPassword",
+        "jmxPort": 8390,
+        "clientTimeoutMs": 2000,
+        "pollingIntervalSeconds": 60,
+        "statCmdMap": {
+            "ds": "/subsystem=datasources/data-source=DefaultDS/statistics=pool:read-resource(include-runtime=true,recursive=true)",
+            "heap": "/core-service=platform-mbean/type=memory :read-attribute(name=heap-memory-usage)",
+            "meta": "/core-service=platform-mbean/type=memory :read-attribute(name=non-heap-memory-usage)",
+            "sysload": "/core-service=platform-mbean/type=operating-system :read-attribute(name=system-load-average)",
+            "classcnt": "/core-service=platform-mbean/type=class-loading :read-attribute(name=loaded-class-count)",
+            "threading": "/core-service=platform-mbean/type=threading :read-resource",
+            "bean": "/deployment=AcxiomDelegation.ear/subdeployment=*/subsystem=ejb3/stateless-session-bean=Solvitur4Bean :read-resource(recursive=true,include-runtime=true)"
+        }
+    },
+
+    "grafana": {
+        "grafanaURL": "https://example.graphana.com:3000",
+        "grafanaHostname": "example.graphana.com",
+        "alertInspectorRelativeURL": "/d/JrQYQiuZz/alert-inspector",
+        "grafanaNowDelayIntervalMs": "90000",
+        "bearerToken": "Bearer your_graphana_bearer_token_here",
+        "renderDir": "/some/path/apm/streaming_stat_parser/renders",
+        "renderWidth": 1800,
+        "renderHeightMultiple": 750, // was 700
+        "renderExtraParams": "&autofitpanels",
+        "renderTimeout": 90000
+    }
+    
+}
