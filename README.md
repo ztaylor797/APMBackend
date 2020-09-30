@@ -22,3 +22,5 @@ This will start up the apm_manager*.js file which manages all of the necessary m
 It also monitors disk space, process memory usage, and unexpected exits.
 
 * _NOTE_ Stopping the controller will not stop the modules it spins up. However, once the manager is restarted, it will automatically gracefully shutdown all previous child modules and restart them. If you want to shutdown everything, for the moment, they must be killed manually. Kill rather than kill -9 is preferred. Please check for instances of perl_tail after as it is possible for their subprocesses to not be killed.
+
+![APM Diagram](ApplicationPerformanceMonitorV2.0.jpeg?raw=true "APM Diagram")
